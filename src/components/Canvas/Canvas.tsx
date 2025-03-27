@@ -33,7 +33,9 @@ const Canvas: React.FC = () => {
     updateShape,
     deleteShape,
     setSelectedShape,
-    setActiveTool
+    setActiveTool,
+    undo,
+    redo
   } = useStore();
 
   console.log('Canvas received from store:', { shapes, selectedShapeId, activeTool });
@@ -42,6 +44,11 @@ const Canvas: React.FC = () => {
   const [startPoint, setStartPoint] = useState<Point | null>(null);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState<Point>({ x: 0, y: 0 });
+  const [isDraggingSelection, setIsDraggingSelection] = useState(false);
+  const [selectionDragStart, setSelectionDragStart] = useState<Point | null>(null);
+  const [showGrid, setShowGrid] = useState(true);
+  const [gridSize, setGridSize] = useState(20);
+  const [snapToGrid, setSnapToGrid] = useState(true);
 
   // Initialize tool if none selected
   useEffect(() => {
@@ -50,6 +57,75 @@ const Canvas: React.FC = () => {
       setActiveTool('rect');
     }
   }, [activeTool, setActiveTool]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Undo: Ctrl+Z
+      if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        console.log('Undo triggered via keyboard');
+      }
+      
+      // Redo: Ctrl+Shift+Z or Ctrl+Y
+      if ((e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey) || 
+          (e.key === 'y' && (e.ctrlKey || e.metaKey))) {
+        e.preventDefault();
+        redo();
+        console.log('Redo triggered via keyboard');
+      }
+      
+      // Delete selected shape
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedShapeId) {
+          console.log('Deleting shape:', selectedShapeId);
+          deleteShape(selectedShapeId);
+          setSelectedShape(null);
+        }
+      }
+      
+      // Escape to deselect
+      if (e.key === 'Escape') {
+        setSelectedShape(null);
+        console.log('Deselected shapes via Escape key');
+      }
+      
+      // Toggle grid: G
+      if (e.key === 'g') {
+        setShowGrid(prev => !prev);
+        console.log('Grid toggled:', !showGrid);
+      }
+      
+      // Toggle snap to grid: Shift+G
+      if (e.key === 'G' && e.shiftKey) {
+        setSnapToGrid(prev => !prev);
+        console.log('Snap to grid toggled:', !snapToGrid);
+      }
+      
+      // Switch tools with keyboard shortcuts
+      switch (e.key) {
+        case 'v': // Select tool
+          setActiveTool('select');
+          break;
+        case 'r': // Rectangle tool
+          setActiveTool('rect');
+          break;
+        case 'c': // Circle tool
+          setActiveTool('circle');
+          break;
+        case 't': // Text tool
+          setActiveTool('text');
+          break;
+        case 'h': // Hand tool
+          setActiveTool('hand');
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedShapeId, deleteShape, setSelectedShape, undo, redo, setActiveTool, showGrid, snapToGrid]);
 
   // Reset canvas size when window resizes
   useEffect(() => {
@@ -70,6 +146,98 @@ const Canvas: React.FC = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Check if a point is inside a shape
+  const isPointInShape = useCallback((point: Point, shape: Shape): boolean => {
+    switch (shape.type) {
+      case 'rect':
+        return (
+          point.x >= shape.x &&
+          point.x <= shape.x + shape.width &&
+          point.y >= shape.y &&
+          point.y <= shape.y + shape.height
+        );
+      case 'circle':
+        const centerX = shape.x + shape.width / 2;
+        const centerY = shape.y + shape.height / 2;
+        const radius = Math.abs(shape.width) / 2;
+        const distance = Math.sqrt(
+          Math.pow(point.x - centerX, 2) + Math.pow(point.y - centerY, 2)
+        );
+        return distance <= radius;
+      case 'text':
+        // Simplified bounding box for text
+        return (
+          point.x >= shape.x &&
+          point.x <= shape.x + shape.width &&
+          point.y >= shape.y - 20 && // Text height approximation
+          point.y <= shape.y
+        );
+      default:
+        return false;
+    }
+  }, []);
+
+  // Find shape under a point
+  const findShapeAtPoint = useCallback((point: Point): string | null => {
+    // Reverse to check top-most shapes first (last in array)
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const shape = shapes[i];
+      if (isPointInShape(point, shape)) {
+        return shape.id;
+      }
+    }
+    return null;
+  }, [shapes, isPointInShape]);
+  
+  // Snap a point to the grid
+  const snapPointToGrid = useCallback((point: Point): Point => {
+    if (!snapToGrid) return point;
+    
+    return {
+      x: Math.round(point.x / gridSize) * gridSize,
+      y: Math.round(point.y / gridSize) * gridSize
+    };
+  }, [gridSize, snapToGrid]);
+
+  // Draw grid
+  const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    if (!showGrid) return;
+    
+    ctx.save();
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 0.5;
+    
+    // Apply canvas transformations
+    ctx.translate(offset.x, offset.y);
+    ctx.scale(scale, scale);
+    
+    // Calculate grid bounds based on current view
+    const visibleWidthInCanvas = width / scale;
+    const visibleHeightInCanvas = height / scale;
+    const startX = Math.floor((-offset.x / scale) / gridSize) * gridSize;
+    const startY = Math.floor((-offset.y / scale) / gridSize) * gridSize;
+    const endX = startX + visibleWidthInCanvas + gridSize;
+    const endY = startY + visibleHeightInCanvas + gridSize;
+    
+    // Draw vertical lines
+    for (let x = startX; x <= endX; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, startY);
+      ctx.lineTo(x, endY);
+      ctx.stroke();
+    }
+    
+    // Draw horizontal lines
+    for (let y = startY; y <= endY; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(startX, y);
+      ctx.lineTo(endX, y);
+      ctx.stroke();
+    }
+    
+    ctx.restore();
+  }, [showGrid, gridSize, offset, scale]);
+
   // Main render function
   const renderCanvas = useCallback(() => {
     console.log('Rendering canvas, shapes:', shapes.length);
@@ -81,6 +249,9 @@ const Canvas: React.FC = () => {
 
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw grid
+    drawGrid(ctx, canvas.width, canvas.height);
 
     // Apply transformations
     ctx.save();
@@ -122,52 +293,97 @@ const Canvas: React.FC = () => {
       if (shape.id === selectedShapeId) {
         ctx.strokeStyle = '#00f';
         ctx.setLineDash([5, 5]);
-        ctx.strokeRect(
-          shape.x - 5,
-          shape.y - 5,
-          shape.width + 10,
-          shape.height + 10
-        );
+        
+        // Draw selection based on shape type
+        switch (shape.type) {
+          case 'rect':
+            ctx.strokeRect(
+              shape.x - 5,
+              shape.y - 5,
+              shape.width + 10,
+              shape.height + 10
+            );
+            break;
+          case 'circle':
+            ctx.beginPath();
+            ctx.arc(
+              shape.x + shape.width / 2,
+              shape.y + shape.height / 2,
+              Math.abs(shape.width) / 2 + 5,
+              0,
+              Math.PI * 2
+            );
+            ctx.stroke();
+            break;
+          case 'text':
+            // Text selection box
+            const textWidth = ctx.measureText(shape.text || '').width;
+            ctx.strokeRect(
+              shape.x - 5,
+              shape.y - 25,
+              textWidth + 10,
+              30
+            );
+            break;
+        }
+        
+        // Draw handles for resizing
         ctx.setLineDash([]);
+        ctx.fillStyle = '#00f';
+        
+        // Draw resize handles based on shape type
+        if (shape.type === 'rect') {
+          // Corner handles
+          [
+            { x: shape.x - 5, y: shape.y - 5 },                        // Top-left
+            { x: shape.x + shape.width - 5, y: shape.y - 5 },          // Top-right
+            { x: shape.x - 5, y: shape.y + shape.height - 5 },         // Bottom-left
+            { x: shape.x + shape.width - 5, y: shape.y + shape.height - 5 }, // Bottom-right
+          ].forEach(handle => {
+            ctx.fillRect(handle.x, handle.y, 10, 10);
+          });
+        } else if (shape.type === 'circle') {
+          // Handle at top, right, bottom, left of circle
+          const cx = shape.x + shape.width / 2;
+          const cy = shape.y + shape.height / 2;
+          const radius = Math.abs(shape.width) / 2;
+          
+          [
+            { x: cx, y: cy - radius - 5 },       // Top
+            { x: cx + radius - 5, y: cy },       // Right
+            { x: cx, y: cy + radius - 5 },       // Bottom
+            { x: cx - radius - 5, y: cy },       // Left
+          ].forEach(handle => {
+            ctx.fillRect(handle.x, handle.y, 10, 10);
+          });
+        }
       }
     });
 
     ctx.restore();
-  }, [shapes, selectedShapeId, scale, offset]);
+  }, [shapes, selectedShapeId, scale, offset, drawGrid]);
 
   // Re-render when dependencies change
   useEffect(() => {
     renderCanvas();
   }, [renderCanvas]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedShapeId) {
-          console.log('Deleting shape:', selectedShapeId);
-          deleteShape(selectedShapeId);
-          setSelectedShape(null);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedShapeId, deleteShape, setSelectedShape]);
-
   const getCanvasPoint = (e: React.MouseEvent<HTMLCanvasElement>): Point => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
 
     const rect = canvas.getBoundingClientRect();
-    return {
+    const point = {
       x: (e.clientX - rect.left - offset.x) / scale,
       y: (e.clientY - rect.top - offset.y) / scale,
     };
+    
+    return snapToGrid ? snapPointToGrid(point) : point;
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     console.log('Mouse down, active tool:', activeTool);
+    const point = getCanvasPoint(e);
     
     if (activeTool === 'hand') {
       setIsDrawing(true);
@@ -175,21 +391,29 @@ const Canvas: React.FC = () => {
       return;
     }
 
-    if (!activeTool || activeTool === 'select') {
-      // Handle selection
+    if (activeTool === 'select') {
+      const shapeId = findShapeAtPoint(point);
+      
+      if (shapeId) {
+        setSelectedShape(shapeId);
+        setIsDraggingSelection(true);
+        setSelectionDragStart(point);
+      } else {
+        setSelectedShape(null);
+      }
       return;
     }
 
-    const point = getCanvasPoint(e);
     console.log('Starting drawing at point:', point);
     setIsDrawing(true);
     setStartPoint(point);
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing || !startPoint) return;
+    if (!isDrawing && !isDraggingSelection) return;
+    const point = getCanvasPoint(e);
 
-    if (activeTool === 'hand') {
+    if (activeTool === 'hand' && startPoint) {
       const dx = e.clientX - startPoint.x;
       const dy = e.clientY - startPoint.y;
       setOffset((prev: Point) => ({
@@ -199,8 +423,28 @@ const Canvas: React.FC = () => {
       setStartPoint({ x: e.clientX, y: e.clientY });
       return;
     }
+    
+    // Handle shape dragging when selection tool is active
+    if (activeTool === 'select' && isDraggingSelection && selectionDragStart && selectedShapeId) {
+      const dx = point.x - selectionDragStart.x;
+      const dy = point.y - selectionDragStart.y;
+      
+      const selectedShape = shapes.find(shape => shape.id === selectedShapeId);
+      if (selectedShape) {
+        // If snap to grid is enabled, snap the new position
+        const newPosition = snapToGrid ? 
+          snapPointToGrid({ x: selectedShape.x + dx, y: selectedShape.y + dy }) : 
+          { x: selectedShape.x + dx, y: selectedShape.y + dy };
+        
+        updateShape(selectedShapeId, newPosition);
+        
+        setSelectionDragStart(point);
+      }
+      return;
+    }
 
-    const point = getCanvasPoint(e);
+    if (!startPoint) return;
+    
     const width = point.x - startPoint.x;
     const height = point.y - startPoint.y;
 
@@ -226,6 +470,10 @@ const Canvas: React.FC = () => {
     if (!ctx) return;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw grid
+    drawGrid(ctx, canvas.width, canvas.height);
+    
     ctx.save();
     ctx.translate(offset.x, offset.y);
     ctx.scale(scale, scale);
@@ -296,6 +544,13 @@ const Canvas: React.FC = () => {
 
   const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
     console.log('Mouse up, drawing:', isDrawing);
+    
+    if (isDraggingSelection) {
+      setIsDraggingSelection(false);
+      setSelectionDragStart(null);
+      return;
+    }
+    
     if (!isDrawing || !startPoint) return;
 
     if (activeTool === 'hand') {
@@ -324,6 +579,9 @@ const Canvas: React.FC = () => {
 
       console.log('Adding new shape:', newShape);
       addShape(newShape);
+      
+      // Auto-select the newly created shape
+      setSelectedShape(newShape.id);
     }
 
     setIsDrawing(false);
@@ -337,6 +595,24 @@ const Canvas: React.FC = () => {
     const newScale = Math.max(0.1, Math.min(10, scale * scaleFactor));
     console.log('Zooming, scale:', newScale);
     setScale(newScale);
+  };
+  
+  // Handle double click for text editing
+  const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const point = getCanvasPoint(e);
+    const shapeId = findShapeAtPoint(point);
+    
+    if (shapeId) {
+      const shape = shapes.find(s => s.id === shapeId);
+      
+      if (shape && shape.type === 'text') {
+        // Prompt for new text
+        const newText = prompt('Enter text:', shape.text);
+        if (newText !== null) {
+          updateShape(shapeId, { text: newText });
+        }
+      }
+    }
   };
 
   return (
@@ -357,6 +633,7 @@ const Canvas: React.FC = () => {
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
         onWheel={handleWheel}
+        onDoubleClick={handleDoubleClick}
         style={{ 
           cursor: activeTool === 'hand' ? 'grab' : 'default',
           display: 'block', 
@@ -364,6 +641,76 @@ const Canvas: React.FC = () => {
           height: '100%'
         }}
       />
+      
+      {/* Grid Controls */}
+      <div style={{
+        position: 'absolute',
+        top: '10px',
+        right: '10px',
+        backgroundColor: 'rgba(255, 255, 255, 0.8)',
+        padding: '8px',
+        borderRadius: '4px',
+        fontSize: '12px',
+        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+          <input 
+            type="checkbox" 
+            id="showGrid" 
+            checked={showGrid} 
+            onChange={() => setShowGrid(!showGrid)} 
+          />
+          <label htmlFor="showGrid" style={{ marginLeft: '4px' }}>Show Grid</label>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+          <input 
+            type="checkbox" 
+            id="snapToGrid" 
+            checked={snapToGrid} 
+            onChange={() => setSnapToGrid(!snapToGrid)} 
+          />
+          <label htmlFor="snapToGrid" style={{ marginLeft: '4px' }}>Snap to Grid</label>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <label htmlFor="gridSize" style={{ marginRight: '4px' }}>Grid Size:</label>
+          <input 
+            type="range" 
+            id="gridSize" 
+            min="5" 
+            max="50" 
+            value={gridSize} 
+            onChange={(e) => setGridSize(Number(e.target.value))} 
+            style={{ width: '80px' }}
+          />
+          <span style={{ marginLeft: '4px' }}>{gridSize}px</span>
+        </div>
+      </div>
+      
+      {/* Keyboard shortcuts info overlay */}
+      <div style={{
+        position: 'absolute',
+        bottom: '10px',
+        right: '10px',
+        backgroundColor: 'rgba(255, 255, 255, 0.8)',
+        padding: '8px',
+        borderRadius: '4px',
+        fontSize: '12px',
+        lineHeight: '1.4',
+        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)'
+      }}>
+        <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>Keyboard Shortcuts:</div>
+        <div>V: Select tool</div>
+        <div>R: Rectangle tool</div>
+        <div>C: Circle tool</div>
+        <div>T: Text tool</div>
+        <div>H: Hand tool</div>
+        <div>G: Toggle grid</div>
+        <div>Shift+G: Toggle snap</div>
+        <div>Ctrl+Z: Undo</div>
+        <div>Ctrl+Shift+Z: Redo</div>
+        <div>Delete: Remove shape</div>
+        <div>Esc: Deselect</div>
+      </div>
     </div>
   );
 };
